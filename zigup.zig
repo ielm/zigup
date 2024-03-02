@@ -37,7 +37,7 @@ fn loginfo(comptime fmt: []const u8, args: anytype) void {
 }
 
 fn download(allocator: Allocator, url: []const u8, writer: anytype) !void {
-    var download_options = ziget.request.DownloadOptions{
+    const download_options = ziget.request.DownloadOptions{
         .flags = 0,
         .allocator = allocator,
         .maxRedirects = 10,
@@ -72,6 +72,15 @@ fn ignoreHttpCallback(request: []const u8) void {
     _ = request;
 }
 
+/// Retrieves the home directory path.
+///
+/// This function attempts to retrieve the home directory path by checking the value of the `HOME`
+/// environment variable. If the variable is not set, an error is logged and `MissingHomeEnvironmentVariable`
+/// is returned.
+///
+/// Returns:
+/// - The home directory path as a null-terminated string.
+/// - `MissingHomeEnvironmentVariable` if the `HOME` environment variable is not set.
 fn getHomeDir() ![]const u8 {
     return std.os.getenv("HOME") orelse {
         std.log.err("cannot find install directory, $HOME environment variable is not set", .{});
@@ -79,24 +88,112 @@ fn getHomeDir() ![]const u8 {
     };
 }
 
+test "getHomeDir" {
+    const home = try getHomeDir();
+    std.debug.print("{s}\n", .{home});
+    try std.testing.expect(std.fs.path.isAbsolute(home));
+}
+
+/// Retrieves the Zig home directory.
+///
+/// This function attempts to retrieve the Zig home directory path from the "ZIGUP_HOME" environment variable.
+/// If the environment variable is not set, it falls back to using the default Zig home directory, which is
+/// determined by the user's home directory. The Zig home directory is a hidden directory named ".zigup" located
+/// in the user's home directory.
+///
+/// Returns:
+///     The Zig home directory path as a null-terminated string.
+///     If an error occurs, it returns an error value of type `![]const u8`.
+fn getZigHomeDir() ![]const u8 {
+    return std.os.getenv("ZIGUP_HOME") orelse {
+        // Use the default zigup home directory
+        const home = try getHomeDir();
+        if (!std.fs.path.isAbsolute(home)) {
+            std.log.err("$HOME environment variable '{s}' is not an absolute path", .{home});
+            return error.BadHomeEnvironmentVariable;
+        }
+        const zig_dir = std.fs.path.join(std.heap.page_allocator, &[_][]const u8{ home, ".zigup" });
+        return zig_dir;
+    };
+}
+
+test "getZigHomeDir" {
+    const zig_dir = try getZigHomeDir();
+    std.debug.print("{s}\n", .{zig_dir});
+    try std.testing.expect(std.fs.path.isAbsolute(zig_dir));
+    try std.testing.expect(std.mem.endsWith(u8, zig_dir, ".zigup"));
+}
+
+/// Retrieves the directory path where the Zig compiler is located.
+///
+/// This function first retrieves the Zig home directory using the `getZigHomeDir` function.
+/// If the Zig home directory is not an absolute path, an error is logged and `error.BadHomeEnvironmentVariable` is returned.
+/// Otherwise, the function joins the Zig home directory with the "compilers" subdirectory and returns the resulting path.
+///
+/// Returns:
+/// - The directory path where the Zig compiler is located.
+/// - An error of type `error.BadHomeEnvironmentVariable` if the Zig home directory is not an absolute path.
+fn getZigCompilerDir() ![]const u8 {
+    const zig_dir = try getZigHomeDir();
+    if (!std.fs.path.isAbsolute(zig_dir)) {
+        std.log.err("ZIGUP_HOME environment variable '{s}' is not an absolute path", .{zig_dir});
+        return error.BadHomeEnvironmentVariable;
+    }
+
+    return std.fs.path.join(std.heap.page_allocator, &[_][]const u8{ zig_dir, "compilers" });
+}
+
+test "getZigCompilerDir" {
+    const compiler_dir = try getZigCompilerDir();
+    std.debug.print("{s}\n", .{compiler_dir});
+    try std.testing.expect(std.fs.path.isAbsolute(compiler_dir));
+}
+
 fn allocInstallDirString(allocator: Allocator) ![]const u8 {
-    // TODO: maybe support ZIG_INSTALL_DIR environment variable?
+    // TODO: maybe support ZIG_INSTALL_DIR environment variable? (@ielm) solved with getZigHomeDir
     // TODO: maybe support a file on the filesystem to configure install dir?
     if (builtin.os.tag == .windows) {
         const self_exe_dir = try std.fs.selfExeDirPathAlloc(allocator);
         defer allocator.free(self_exe_dir);
-        return std.fs.path.join(allocator, &.{ self_exe_dir, "zig" });
+        return std.fs.path.join(allocator, &.{ self_exe_dir, ".zigup/compilers" });
     }
-    const home = try getHomeDir();
-    if (!std.fs.path.isAbsolute(home)) {
-        std.log.err("$HOME environment variable '{s}' is not an absolute path", .{home});
-        return error.BadHomeEnvironmentVariable;
+
+    const zig_dir = try getZigCompilerDir();
+    if (!std.fs.path.isAbsolute(zig_dir)) {
+        std.log.err("Zig Compiler Dir '{s}' is not an absolute path", .{zig_dir});
+        return error.BadZigHomeEnvironmentVariable;
     }
-    return std.fs.path.join(allocator, &[_][]const u8{ home, "zig" });
+
+    return zig_dir;
 }
+
+test "allocInstallDirString" {
+    const allocator = std.heap.page_allocator;
+    const install_dir = try allocInstallDirString(allocator);
+    std.debug.print("{s}\n", .{install_dir});
+    try std.testing.expect(std.fs.path.isAbsolute(install_dir));
+}
+
 const GetInstallDirOptions = struct {
     create: bool,
 };
+
+/// Retrieves the installation directory.
+///
+/// This function returns the installation directory as a null-terminated string.
+/// If the installation directory has not been set globally, it will attempt to allocate
+/// a new installation directory string using the provided allocator.
+/// If the `create` option is set to `true`, it will create the installation directory
+/// if it does not already exist.
+///
+/// # Parameters
+/// - `allocator`: The allocator to use for allocating memory for the installation directory string.
+/// - `options`: Options for retrieving the installation directory.
+///
+/// # Returns
+/// The installation directory as a null-terminated string.
+/// If an error occurs during the retrieval or creation of the installation directory,
+/// it returns an error value.
 fn getInstallDir(allocator: Allocator, options: GetInstallDirOptions) ![]const u8 {
     var optional_dir_to_free_on_error: ?[]const u8 = null;
     errdefer if (optional_dir_to_free_on_error) |dir| allocator.free(dir);
@@ -190,34 +287,51 @@ pub fn main2() !u8 {
     //defer std.process.argsFree(allocator, argsArray);
 
     var args = if (args_array.len == 0) args_array else args_array[1..];
-    // parse common options
-    //
     {
+        // Iterate over the command line arguments and process them
         var i: usize = 0;
         var newlen: usize = 0;
         while (i < args.len) : (i += 1) {
             const arg = args[i];
+            // Check if the argument is "--install-dir"
             if (std.mem.eql(u8, "--install-dir", arg)) {
+                // Get the value of the "--install-dir" option
                 global_optional_install_dir = try getCmdOpt(args, &i);
+                // Check if the value is not an absolute path
                 if (!std.fs.path.isAbsolute(global_optional_install_dir.?)) {
+                    // Convert the value to an absolute path
                     global_optional_install_dir = try toAbsolute(allocator, global_optional_install_dir.?);
                 }
-            } else if (std.mem.eql(u8, "--path-link", arg)) {
+            }
+            // Check if the argument is "--path-link"
+            else if (std.mem.eql(u8, "--path-link", arg)) {
+                // Get the value of the "--path-link" option
                 global_optional_path_link = try getCmdOpt(args, &i);
+                // Check if the value is not an absolute path
                 if (!std.fs.path.isAbsolute(global_optional_path_link.?)) {
+                    // Convert the value to an absolute path
                     global_optional_path_link = try toAbsolute(allocator, global_optional_path_link.?);
                 }
-            } else if (std.mem.eql(u8, "-h", arg) or std.mem.eql(u8, "--help", arg)) {
+            }
+            // Check if the argument is "-h" or "--help"
+            else if (std.mem.eql(u8, "-h", arg) or std.mem.eql(u8, "--help", arg)) {
+                // Display the help message
                 help();
                 return 0;
-            } else {
+            }
+            // Handle other arguments
+            else {
+                // Check if it's the first argument and it's "run"
                 if (newlen == 0 and std.mem.eql(u8, "run", arg)) {
+                    // Run the compiler with the remaining arguments
                     return try runCompiler(allocator, args[i + 1 ..]);
                 }
+                // Copy the argument to the new array of arguments
                 args[newlen] = args[i];
                 newlen += 1;
             }
         }
+        // Update the arguments array with the new length
         args = args[0..newlen];
     }
     if (args.len == 0) {
@@ -282,7 +396,7 @@ pub fn main2() !u8 {
                 if (!std.mem.eql(u8, version_string, "master"))
                     break :init_resolved version_string;
 
-                var optional_master_dir: ?[]const u8 = blk: {
+                const optional_master_dir: ?[]const u8 = blk: {
                     var install_dir = std.fs.openIterableDirAbsolute(install_dir_string, .{}) catch |e| switch (e) {
                         error.FileNotFound => break :blk null,
                         else => return e,
@@ -426,6 +540,9 @@ fn loggyMakeDirAbsolute(dir_absolute: []const u8) !void {
     } else {
         loginfo("mkdir '{s}'", .{dir_absolute});
     }
+    std.debug.print("mkdir '{s}'\n", .{dir_absolute});
+    // ensure that dir is absolute else make it absolute
+
     try std.fs.makeDirAbsolute(dir_absolute);
 }
 
@@ -466,7 +583,7 @@ pub fn loggyUpdateSymlink(target_path: []const u8, sym_link_path: []const u8, fl
         error.NotLink => {
             std.debug.print(
                 "unable to update/overwrite the 'zig' PATH symlink, the file '{s}' already exists and is not a symlink\n",
-                .{ sym_link_path},
+                .{sym_link_path},
             );
             std.os.exit(1);
         },
@@ -536,6 +653,14 @@ fn keepCompiler(allocator: Allocator, compiler_version: []const u8) !void {
     loginfo("created '{s}{c}{s}{c}{s}'", .{ install_dir_string, std.fs.path.sep, compiler_version, std.fs.path.sep, "keep" });
 }
 
+fn isIterableDirEmpty(iterableDir: std.fs.IterableDir) !bool {
+    var iter = iterableDir.iterate();
+    while (try iter.next()) |_| {
+        return false;
+    }
+    return true;
+}
+
 fn cleanCompilers(allocator: Allocator, compiler_name_opt: ?[]const u8) !void {
     const install_dir_string = try getInstallDir(allocator, .{ .create = true });
     defer allocator.free(install_dir_string);
@@ -548,6 +673,11 @@ fn cleanCompilers(allocator: Allocator, compiler_name_opt: ?[]const u8) !void {
         else => return e,
     };
     defer install_dir.close();
+
+    if (try isIterableDirEmpty(install_dir)) {
+        return;
+    }
+
     const master_points_to_opt = try getMasterDir(allocator, &install_dir.dir);
     defer if (master_points_to_opt) |master_points_to| allocator.free(master_points_to);
     if (compiler_name_opt) |compiler_name| {
@@ -583,6 +713,7 @@ fn cleanCompilers(allocator: Allocator, compiler_name_opt: ?[]const u8) !void {
         }
     }
 }
+
 fn readDefaultCompiler(allocator: Allocator, buffer: *[std.fs.MAX_PATH_BYTES + 1]u8) !?[]const u8 {
     const path_link = try makeZigPathLinkString(allocator);
     defer allocator.free(path_link);
@@ -632,7 +763,7 @@ fn readMasterDir(buffer: *[std.fs.MAX_PATH_BYTES]u8, install_dir: *std.fs.Dir) !
 fn getDefaultCompiler(allocator: Allocator) !?[]const u8 {
     var buffer: [std.fs.MAX_PATH_BYTES + 1]u8 = undefined;
     const slice_path = (try readDefaultCompiler(allocator, &buffer)) orelse return null;
-    var path_to_return = try allocator.alloc(u8, slice_path.len);
+    const path_to_return = try allocator.alloc(u8, slice_path.len);
     std.mem.copy(u8, path_to_return, slice_path);
     return path_to_return;
 }
@@ -640,7 +771,7 @@ fn getDefaultCompiler(allocator: Allocator) !?[]const u8 {
 fn getMasterDir(allocator: Allocator, install_dir: *std.fs.Dir) !?[]const u8 {
     var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     const slice_path = (try readMasterDir(&buffer, install_dir)) orelse return null;
-    var path_to_return = try allocator.alloc(u8, slice_path.len);
+    const path_to_return = try allocator.alloc(u8, slice_path.len);
     std.mem.copy(u8, path_to_return, slice_path);
     return path_to_return;
 }
@@ -790,11 +921,11 @@ fn enforceNoZig(path_link: []const u8, exe: []const u8) !void {
 
 const FileId = struct {
     dev: if (builtin.os.tag == .windows) u32 else blk: {
-        var st: std.os.Stat = undefined;
+        const st: std.os.Stat = undefined;
         break :blk @TypeOf(st.dev);
     },
     ino: if (builtin.os.tag == .windows) u64 else blk: {
-        var st: std.os.Stat = undefined;
+        const st: std.os.Stat = undefined;
         break :blk @TypeOf(st.ino);
     },
 
@@ -876,7 +1007,7 @@ fn createExeLink(link_target: []const u8, path_link: []const u8) !void {
         error.IsDir => {
             std.debug.print(
                 "unable to create the exe link, the path '{s}' is a directory\n",
-                .{ path_link},
+                .{path_link},
             );
             std.os.exit(1);
         },
